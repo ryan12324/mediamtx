@@ -44,13 +44,16 @@ func (p *Parameters) Unmarshal(count int, buf []byte) (int, error) {
 		case typeAuthorizationToken:
 			param = &AuthorizationToken{}
 
+		case typeLargestObject:
+			param = &LargestObject{}
+
 		default:
 			return 0, fmt.Errorf("unsupported parameter type: %d", currentType)
 		}
 
 		n, err = param.unmarshal(buf)
 		if err != nil {
-			return 0, fmt.Errorf("failed to unmarshal authorization token: %w", err)
+			return 0, fmt.Errorf("failed to unmarshal parameter type %d: %w", currentType, err)
 		}
 		buf = buf[n:]
 
