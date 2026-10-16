@@ -72,6 +72,17 @@ var cases = []struct {
 			&parameter.LargestObject{Group: 300, Object: 5},
 		},
 	},
+	{
+		name:  "group order",
+		count: 1,
+		enc: []byte{
+			0x22, // type delta = 0x22 (GroupOrder)
+			0x01, // Ascending
+		},
+		dec: parameter.Parameters{
+			new(parameter.GroupOrderAscending),
+		},
+	},
 }
 
 func TestUnmarshal(t *testing.T) {
@@ -92,6 +103,15 @@ func TestMarshal(t *testing.T) {
 			ca.dec.MarshalTo(buf)
 			require.Equal(t, ca.enc, buf)
 		})
+	}
+}
+
+func TestUnmarshalInvalidGroupOrder(t *testing.T) {
+	// spec: draft-18/19, section 10.2.8, values other than 1 and 2 are a protocol violation.
+	for _, v := range []byte{0x00, 0x03} {
+		var params parameter.Parameters
+		_, err := params.Unmarshal(1, []byte{0x22, v})
+		require.Error(t, err)
 	}
 }
 

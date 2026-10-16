@@ -47,6 +47,9 @@ func (p *Parameters) Unmarshal(count int, buf []byte) (int, error) {
 		case typeLargestObject:
 			param = &LargestObject{}
 
+		case typeGroupOrder:
+			param = new(GroupOrder)
+
 		default:
 			return 0, fmt.Errorf("unsupported parameter type: %d", currentType)
 		}
