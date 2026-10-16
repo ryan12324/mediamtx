@@ -371,11 +371,12 @@ func (c *Client) Errors() <-chan error {
 }
 
 // Subscribe sends a SUBSCRIBE request.
+// It returns the track properties of the SUBSCRIBE_OK.
 func (c *Client) Subscribe(
 	ctx context.Context,
 	trackName string,
 	onSubGroup func(sg *subgroup.SubGroup) error,
-) error {
+) (property.Properties, error) {
 	requestID := c.nextRequestID
 	c.nextRequestID++
 
@@ -384,7 +385,7 @@ func (c *Client) Subscribe(
 
 	bidi, err := c.conn.OpenStreamSync(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var params []parameter.Parameter
@@ -400,13 +401,13 @@ func (c *Client) Subscribe(
 	}.Marshal())
 	if err != nil {
 		bidi.Close() //nolint:errcheck
-		return err
+		return nil, err
 	}
 
 	msg, err := controlmessage.Read(bidi)
 	if err != nil {
 		bidi.Close() //nolint:errcheck
-		return err
+		return nil, err
 	}
 
 	switch msg := msg.(type) {
@@ -419,15 +420,15 @@ func (c *Client) Subscribe(
 
 		// do not close the stream
 		go io.Copy(io.Discard, bidi) //nolint:errcheck
-		return nil
+		return msg.TrackProperties, nil
 
 	case *controlmessage.RequestError:
 		bidi.Close() //nolint:errcheck
-		return fmt.Errorf("subscribe failed: %s", msg.Reason)
+		return nil, fmt.Errorf("subscribe failed: %s", msg.Reason)
 
 	default:
 		bidi.Close() //nolint:errcheck
-		return fmt.Errorf("unexpected subscribe response: %T", msg)
+		return nil, fmt.Errorf("unexpected subscribe response: %T", msg)
 	}
 }
 

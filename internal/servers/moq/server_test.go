@@ -212,7 +212,7 @@ func TestServer(t *testing.T) {
 			if catalogName == "" {
 				catalogName = "catalog"
 			}
-			err = client.Subscribe(ctx, catalogName, func(sg *subgroup.SubGroup) error {
+			_, err = client.Subscribe(ctx, catalogName, func(sg *subgroup.SubGroup) error {
 				received <- sg
 				return nil
 			})
@@ -477,7 +477,7 @@ func TestServerNativeQUICSubscribe(t *testing.T) {
 			if catalogName == "" {
 				catalogName = "catalog"
 			}
-			err = client.Subscribe(ctx, catalogName, func(sg *subgroup.SubGroup) error {
+			_, err = client.Subscribe(ctx, catalogName, func(sg *subgroup.SubGroup) error {
 				received <- sg
 				return nil
 			})

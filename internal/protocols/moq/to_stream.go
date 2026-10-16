@@ -26,8 +26,32 @@ func findTimestamp(props []property.Property) (int64, bool) {
 	return 0, false
 }
 
+func findTimescale(props []property.Property) uint64 {
+	for _, pr := range props {
+		if ts, ok := pr.(*property.Timescale); ok {
+			return uint64(*ts)
+		}
+	}
+	return 0
+}
+
+func multiplyAndDivide(v, m, d int64) int64 {
+	secs := v / d
+	dec := v % d
+	return (secs*m + dec*m/d)
+}
+
 // ToStream maps a Media-over-QUIC catalog and published tracks to a MediaMTX stream.
-func ToStream(cat *catalog.Catalog, subStream **stream.SubStream) (
+//
+// trackTimescale returns the TIMESCALE track property of a track, or zero if
+// the track has none. A TIMESCALE object property takes precedence over it.
+// Timestamps of tracks without a TIMESCALE are taken in the clock rate of the
+// format, as before.
+func ToStream(
+	cat *catalog.Catalog,
+	subStream **stream.SubStream,
+	trackTimescale func(trackAlias uint64) uint64,
+) (
 	[]*description.Media,
 	map[uint64]func(sg *subgroup.SubGroup) error,
 	error,
@@ -35,11 +59,24 @@ func ToStream(cat *catalog.Catalog, subStream **stream.SubStream) (
 	var medias []*description.Media
 	writeFuncs := make(map[uint64]func(sg *subgroup.SubGroup) error)
 
-	wrap := func(wrapped func(payload []byte, pts int64) error) func(sg *subgroup.SubGroup) error {
+	wrap := func(
+		forma format.Format,
+		trackAlias uint64,
+		wrapped func(payload []byte, pts int64) error,
+	) func(sg *subgroup.SubGroup) error {
 		return func(sg *subgroup.SubGroup) error {
 			ts, ok := findTimestamp(sg.Objects[0].Properties)
 			if !ok {
 				return fmt.Errorf("timestamp property is required")
+			}
+
+			timescale := findTimescale(sg.Objects[0].Properties)
+			if timescale == 0 && trackTimescale != nil {
+				timescale = trackTimescale(trackAlias)
+			}
+
+			if timescale != 0 {
+				ts = multiplyAndDivide(ts, int64(forma.ClockRate()), int64(timescale))
 			}
 
 			return wrapped(sg.Objects[0].Payload, ts)
@@ -60,7 +97,7 @@ func ToStream(cat *catalog.Catalog, subStream **stream.SubStream) (
 			}
 			medias = append(medias, media)
 
-			writeFuncs[trackAlias] = wrap(func(payload []byte, pts int64) error {
+			writeFuncs[trackAlias] = wrap(forma, trackAlias, func(payload []byte, pts int64) error {
 				var bs av1.Bitstream
 				err := bs.Unmarshal(payload)
 				if err != nil {
@@ -81,7 +118,7 @@ func ToStream(cat *catalog.Catalog, subStream **stream.SubStream) (
 			}
 			medias = append(medias, media)
 
-			writeFuncs[trackAlias] = wrap(func(payload []byte, pts int64) error {
+			writeFuncs[trackAlias] = wrap(forma, trackAlias, func(payload []byte, pts int64) error {
 				(*subStream).WriteUnit(media, forma, &unit.Unit{PTS: pts, Payload: unit.PayloadVP9(payload)})
 				return nil
 			})
@@ -96,7 +133,7 @@ func ToStream(cat *catalog.Catalog, subStream **stream.SubStream) (
 			}
 			medias = append(medias, media)
 
-			writeFuncs[trackAlias] = wrap(func(payload []byte, pts int64) error {
+			writeFuncs[trackAlias] = wrap(forma, trackAlias, func(payload []byte, pts int64) error {
 				(*subStream).WriteUnit(media, forma, &unit.Unit{PTS: pts, Payload: unit.PayloadVP8(payload)})
 				return nil
 			})
@@ -111,7 +148,7 @@ func ToStream(cat *catalog.Catalog, subStream **stream.SubStream) (
 			}
 			medias = append(medias, media)
 
-			writeFuncs[trackAlias] = wrap(func(payload []byte, pts int64) error {
+			writeFuncs[trackAlias] = wrap(forma, trackAlias, func(payload []byte, pts int64) error {
 				var nalus h264.AVCC
 				err := nalus.Unmarshal(payload)
 				if err != nil {
@@ -132,7 +169,7 @@ func ToStream(cat *catalog.Catalog, subStream **stream.SubStream) (
 			}
 			medias = append(medias, media)
 
-			writeFuncs[trackAlias] = wrap(func(payload []byte, pts int64) error {
+			writeFuncs[trackAlias] = wrap(forma, trackAlias, func(payload []byte, pts int64) error {
 				var nalus h264.AVCC
 				err := nalus.Unmarshal(payload)
 				if err != nil {
@@ -158,7 +195,7 @@ func ToStream(cat *catalog.Catalog, subStream **stream.SubStream) (
 			}
 			medias = append(medias, media)
 
-			writeFuncs[trackAlias] = wrap(func(payload []byte, pts int64) error {
+			writeFuncs[trackAlias] = wrap(forma, trackAlias, func(payload []byte, pts int64) error {
 				(*subStream).WriteUnit(media, forma, &unit.Unit{PTS: pts, Payload: unit.PayloadOpus{payload}})
 				return nil
 			})
@@ -183,7 +220,7 @@ func ToStream(cat *catalog.Catalog, subStream **stream.SubStream) (
 			}
 			medias = append(medias, media)
 
-			writeFuncs[trackAlias] = wrap(func(payload []byte, pts int64) error {
+			writeFuncs[trackAlias] = wrap(forma, trackAlias, func(payload []byte, pts int64) error {
 				(*subStream).WriteUnit(media, forma, &unit.Unit{PTS: pts, Payload: unit.PayloadMPEG4Audio{payload}})
 				return nil
 			})

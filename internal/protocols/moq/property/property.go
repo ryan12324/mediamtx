@@ -40,8 +40,18 @@ func (p *Properties) Unmarshal(buf []byte) error {
 		currentType += uint64(delta)
 
 		switch currentType {
-		case timestampPropertyType:
+		case timestampPropertyTypeLOC03, timestampPropertyTypeLOC04:
 			var ts Timestamp
+			var n2 int
+			n2, err = ts.unmarshal(buf)
+			if err != nil {
+				return err
+			}
+			*p = append(*p, &ts)
+			buf = buf[n2:]
+
+		case timescalePropertyType:
+			var ts Timescale
 			var n2 int
 			n2, err = ts.unmarshal(buf)
 			if err != nil {
