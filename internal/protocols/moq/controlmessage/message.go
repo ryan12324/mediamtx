@@ -58,6 +58,8 @@ func Read(r io.Reader) (Message, error) {
 		m = &PublishOk{}
 	case typeRequestOk:
 		m = &RequestOk{}
+	case typePublishNamespace:
+		m = &PublishNamespace{}
 	default:
 		return nil, fmt.Errorf("unknown message type: 0x%x", t)
 	}

@@ -27,6 +27,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/protocols/moq"
 	"github.com/bluenviron/mediamtx/internal/protocols/moq/catalog"
 	"github.com/bluenviron/mediamtx/internal/protocols/moq/controlmessage"
+	"github.com/bluenviron/mediamtx/internal/protocols/moq/namespace"
 	"github.com/bluenviron/mediamtx/internal/protocols/moq/parameter"
 	"github.com/bluenviron/mediamtx/internal/protocols/moq/property"
 	"github.com/bluenviron/mediamtx/internal/protocols/moq/reorderer"
@@ -111,6 +112,10 @@ type session struct {
 	publishReady    chan struct{}            // publish only
 	inboundTracks   map[uint64]*inboundTrack // publish only
 	trackTimescales map[uint64]uint64        // publish only
+	pullMode        bool                     // publish only
+	catalogAlias    uint64                   // publish only
+	catalogKnown    chan struct{}            // publish only
+	nextRequestID   uint64
 
 	inboundBytes  atomic.Uint64
 	outboundBytes atomic.Uint64
@@ -127,6 +132,14 @@ func (s *session) initialize() {
 
 	s.catalogReceived = make(chan *catalog.Catalog, 1)
 	s.publishReady = make(chan struct{})
+
+	// with PUBLISH, the catalog has track alias 0.
+	s.catalogKnown = make(chan struct{})
+	close(s.catalogKnown)
+
+	// the server generates odd request IDs, starting at 1.
+	// spec: draft-18/19, section 10.1
+	s.nextRequestID = 1
 
 	s.setupReceived = make(chan struct{})
 	s.done = make(chan struct{})
@@ -392,6 +405,15 @@ func (s *session) runBidiStream(wstream io.ReadWriteCloser) error {
 		}
 
 		return s.onPublishTrack(wstream, m)
+
+	case *controlmessage.PublishNamespace:
+		s.Log(logger.Debug, "PUBLISH_NAMESPACE namespace=%v", m.Namespace)
+
+		if s.version == defs.APIMoQVersionDraft16 || s.version == defs.APIMoQVersionDraft17 {
+			return fmt.Errorf("PUBLISH_NAMESPACE is not supported with %s", s.version)
+		}
+
+		return s.onPublishNamespace(wstream, m)
 
 	default:
 		return fmt.Errorf("unsupported message type: %T", msg)
@@ -745,6 +767,212 @@ func (s *session) onPublishTrack(wstream io.ReadWriteCloser, m *controlmessage.P
 	return fmt.Errorf("PUBLISH track stream closed")
 }
 
+// onPublishNamespace handles a publisher that announces a namespace and
+// waits for us to subscribe to its tracks, instead of sending PUBLISH for
+// each track. We subscribe to the catalog, then to each track it lists,
+// and bind each track to the alias the publisher assigns in SUBSCRIBE_OK.
+// spec:
+// * draft-18/19, sections 9.5, 10.15 and 11.1
+func (s *session) onPublishNamespace(wstream io.ReadWriteCloser, m *controlmessage.PublishNamespace) error {
+	s.mutex.Lock()
+	if s.state != defs.APIMoQSessionStateIdle {
+		s.mutex.Unlock()
+		return fmt.Errorf("unexpected PUBLISH_NAMESPACE in state %s", s.state)
+	}
+	s.state = defs.APIMoQSessionStatePublish
+	s.pullMode = true
+	s.catalogKnown = make(chan struct{})
+	s.mutex.Unlock()
+
+	pathName, query := s.getPathNameAndQuery()
+	credentials := credentialsFromAuthorizationToken(findAuthorizationToken(m.Parameters))
+	remoteHost, _, _ := net.SplitHostPort(s.conn.RemoteAddr().String())
+
+	accessRequest := defs.PathAccessRequest{
+		Name:                 pathName,
+		Query:                query,
+		Publish:              true,
+		Proto:                auth.ProtocolMoQ,
+		ID:                   &s.uuid,
+		Credentials:          credentials,
+		IP:                   net.ParseIP(remoteHost),
+		UserAgent:            s.userAgent,
+		EnableAskCredentials: false,
+	}
+
+	// check that the publisher is allowed to publish before subscribing to anything.
+	_, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
+		Author:        s,
+		AccessRequest: accessRequest,
+	})
+	if err != nil {
+		var code controlmessage.RequestErrorCode
+		if _, ok := errors.AsType[*auth.Error](err); ok {
+			code = controlmessage.RequestErrorCodeUnauthorized
+		} else {
+			code = controlmessage.RequestErrorCodeUninterested
+		}
+
+		wstream.Write(controlmessage.RequestError{ //nolint:errcheck
+			Code:   code,
+			Reason: err.Error(),
+		}.Marshal())
+
+		// wait for the client to read the error
+		wstream.Close() //nolint:errcheck
+		io.Copy(io.Discard, wstream)
+
+		return err
+	}
+
+	_, err = wstream.Write(controlmessage.RequestOk{}.Marshal())
+	if err != nil {
+		return err
+	}
+
+	catOk, err := s.subscribe(m.Namespace, "catalog")
+	if err != nil {
+		return err
+	}
+
+	s.mutex.Lock()
+	s.catalogAlias = catOk.TrackAlias
+	close(s.catalogKnown)
+	s.mutex.Unlock()
+
+	var cat *catalog.Catalog
+	select {
+	case cat = <-s.catalogReceived:
+	case <-s.ctx.Done():
+		return fmt.Errorf("terminated")
+	}
+
+	var subStream *stream.SubStream
+
+	medias, writeFuncs, err := moq.ToStream(cat, &subStream, s.trackTimescale)
+	if err != nil {
+		return err
+	}
+
+	s.inboundTracks = make(map[uint64]*inboundTrack)
+
+	orchestrator := &reorderer.Orchestrator{Parent: s}
+	orchestrator.Initialize()
+
+	for i, track := range cat.Tracks {
+		var res *controlmessage.SubscribeOk
+		res, err = s.subscribe(m.Namespace, track.Name)
+		if err != nil {
+			return err
+		}
+
+		// spec: draft-18/19, section 11.1
+		if _, ok := s.inboundTracks[res.TrackAlias]; ok || res.TrackAlias == catOk.TrackAlias {
+			return fmt.Errorf("duplicate track alias: %d", res.TrackAlias)
+		}
+
+		// ToStream refers to tracks by their position in the catalog.
+		for _, pr := range res.TrackProperties {
+			if ts, ok := pr.(*property.Timescale); ok {
+				s.mutex.Lock()
+				if s.trackTimescales == nil {
+					s.trackTimescales = make(map[uint64]uint64)
+				}
+				s.trackTimescales[uint64(i+1)] = uint64(*ts)
+				s.mutex.Unlock()
+			}
+		}
+
+		tr := &inboundTrack{
+			onSubGroup:   writeFuncs[uint64(i+1)],
+			orchestrator: orchestrator,
+		}
+		tr.initialize()
+		s.inboundTracks[res.TrackAlias] = tr
+	}
+
+	addRes, err := s.pathManager.AddPublisher(defs.PathAddPublisherReq{
+		Author:        s,
+		Desc:          &description.Session{Medias: medias},
+		UseRTPPackets: false,
+		ReplaceNTP:    true,
+		AccessRequest: accessRequest,
+	})
+	if err != nil {
+		return err
+	}
+
+	s.mutex.Lock()
+	s.path = addRes.Path
+	s.mutex.Unlock()
+
+	subStream = addRes.SubStream
+
+	close(s.publishReady)
+
+	wstream.Close() //nolint:errcheck
+	io.Copy(io.Discard, wstream)
+
+	return fmt.Errorf("PUBLISH_NAMESPACE stream closed")
+}
+
+// subscribe sends SUBSCRIBE for a track of a publisher and returns its SUBSCRIBE_OK.
+// The request stream stays open for as long as the subscription lasts.
+func (s *session) subscribe(ns namespace.Namespace, trackName string) (*controlmessage.SubscribeOk, error) {
+	bidi, err := s.conn.OpenStreamSync(s.ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mutex.Lock()
+	requestID := s.nextRequestID
+	s.nextRequestID += 2
+	s.mutex.Unlock()
+
+	_, err = bidi.Write(controlmessage.Subscribe{
+		RequestID: requestID,
+		Namespace: ns,
+		TrackName: trackName,
+	}.Marshal())
+	if err != nil {
+		return nil, err
+	}
+
+	msg, err := controlmessage.Read(bidi)
+	if err != nil {
+		return nil, err
+	}
+
+	switch msg := msg.(type) {
+	case *controlmessage.SubscribeOk:
+		return msg, nil
+
+	case *controlmessage.RequestError:
+		return nil, fmt.Errorf("SUBSCRIBE to track '%s' failed: %s", trackName, msg.Reason)
+
+	default:
+		return nil, fmt.Errorf("unexpected response to SUBSCRIBE: %T", msg)
+	}
+}
+
+// isCatalogAlias tells whether a track alias is the one of the catalog.
+func (s *session) isCatalogAlias(trackAlias uint64) (bool, error) {
+	s.mutex.Lock()
+	catalogKnown := s.catalogKnown
+	s.mutex.Unlock()
+
+	// with PUBLISH_NAMESPACE, objects can arrive before SUBSCRIBE_OK has been read.
+	select {
+	case <-catalogKnown:
+	case <-s.ctx.Done():
+		return false, fmt.Errorf("terminated")
+	}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	return trackAlias == s.catalogAlias, nil
+}
+
 func (s *session) onUniSubGroup(r io.Reader) error {
 	sr := &subgroup.Reader{R: r}
 	err := sr.ReadHeader()
@@ -752,7 +980,12 @@ func (s *session) onUniSubGroup(r io.Reader) error {
 		return err
 	}
 
-	if sr.Header.TrackAlias == 0 {
+	isCatalog, err := s.isCatalogAlias(sr.Header.TrackAlias)
+	if err != nil {
+		return err
+	}
+
+	if isCatalog {
 		return s.onDataCatalog(r, sr)
 	}
 
@@ -778,7 +1011,16 @@ func (s *session) onDataCatalog(r io.Reader, sr *subgroup.Reader) error {
 	select {
 	case s.catalogReceived <- &cat:
 	default:
-		return fmt.Errorf("catalog already received")
+		s.mutex.Lock()
+		pullMode := s.pullMode
+		s.mutex.Unlock()
+
+		// with PUBLISH_NAMESPACE, the publisher sends a new catalog group when
+		// the catalog changes. Tracks can't be changed while publishing.
+		if !pullMode {
+			return fmt.Errorf("catalog already received")
+		}
+		s.Log(logger.Warn, "ignoring catalog update")
 	}
 
 	io.Copy(io.Discard, r)
