@@ -86,6 +86,12 @@ func ToStream(
 	for i, track := range cat.Tracks {
 		trackAlias := uint64(i + 1)
 
+		// MSF delivers media with LOC packaging, and the catalog must say so.
+		// spec: draft-ietf-moq-msf-01, sections 4.1 and 5.2.4
+		if track.Packaging != "loc" {
+			return nil, nil, fmt.Errorf("unsupported packaging of track '%s': '%s'", track.Name, track.Packaging)
+		}
+
 		switch {
 		case strings.HasPrefix(track.Codec, "av01"):
 			forma := &format.AV1{

@@ -21,13 +21,13 @@ import (
 func TestToStream(t *testing.T) {
 	cat := &catalog.Catalog{
 		Tracks: []catalog.Track{
-			{Codec: "av01.0.04M.08"},
-			{Codec: "vp09.00.10.08"},
-			{Codec: "vp8"},
-			{Codec: "hev1.1.6.L93.B0"},
-			{Codec: "avc3.640028"},
-			{Codec: "opus"},
-			{Codec: "mp4a.40.2", Samplerate: 44100, Channels: 2},
+			{Codec: "av01.0.04M.08", Packaging: "loc"},
+			{Codec: "vp09.00.10.08", Packaging: "loc"},
+			{Codec: "vp8", Packaging: "loc"},
+			{Codec: "hev1.1.6.L93.B0", Packaging: "loc"},
+			{Codec: "avc3.640028", Packaging: "loc"},
+			{Codec: "opus", Packaging: "loc"},
+			{Codec: "mp4a.40.2", Packaging: "loc", Samplerate: 44100, Channels: 2},
 		},
 	}
 
@@ -103,7 +103,7 @@ func TestToStreamTimescale(t *testing.T) {
 		},
 	} {
 		t.Run(ca.name, func(t *testing.T) {
-			cat := &catalog.Catalog{Tracks: []catalog.Track{{Codec: "hev1.1.6.L93.B0"}}}
+			cat := &catalog.Catalog{Tracks: []catalog.Track{{Codec: "hev1.1.6.L93.B0", Packaging: "loc"}}}
 
 			var subStream *stream.SubStream
 			medias, writeFuncs, err := moq.ToStream(cat, &subStream, func(trackAlias uint64) uint64 {
@@ -146,4 +146,16 @@ func TestToStreamTimescale(t *testing.T) {
 			require.Equal(t, ca.pts, <-recv)
 		})
 	}
+}
+
+func TestToStreamUnsupportedPackaging(t *testing.T) {
+	// moq-net's MPEG-TS import uses its own "legacy" packaging.
+	cat := &catalog.Catalog{
+		Tracks: []catalog.Track{
+			{Name: "0.avc3", Codec: "avc3.42c01f", Packaging: "legacy"},
+		},
+	}
+
+	_, _, err := moq.ToStream(cat, nil, nil)
+	require.EqualError(t, err, "unsupported packaging of track '0.avc3': 'legacy'")
 }
