@@ -180,6 +180,21 @@ var cases = []struct {
 		},
 	},
 	{
+		name: "publish_namespace",
+		enc: []byte{
+			0x06,       // type 0x06
+			0x00, 0x07, // length = 7
+			0x00,                   // RequestID = 0
+			0x01,                   // namespace count = 1
+			0x03, 0x63, 0x61, 0x6d, // namespace[0] = "cam"
+			0x00, // parameters count = 0
+		},
+		dec: &controlmessage.PublishNamespace{
+			RequestID: 0,
+			Namespace: namespace.Namespace{"cam"},
+		},
+	},
+	{
 		name: "publish with parameters",
 		enc: []byte{
 			0x1D,       // type 0x1D

@@ -11,7 +11,7 @@ Media-over-QUIC has a wide range of features and variants, most of them in activ
 
 - The server supports `draft-19`, `draft-18`, `draft-17` and `draft-16` of the [main specification](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-19), and prefers `draft-19` when multiple versions are offered during negotiation.
 - We support using Media-over-QUIC through browsers with the WebTransport API and through native QUIC clients.
-- We support the `PUBLISH` and `SUBSCRIBE` messages only, which are the ones meant to be used with a routing solution like _MediaMTX_.
+- We support the `PUBLISH`, `PUBLISH_NAMESPACE` and `SUBSCRIBE` messages, which are the ones meant to be used with a routing solution like _MediaMTX_. Publishers can send `PUBLISH` for each track, or send `PUBLISH_NAMESPACE` and let the server subscribe to the catalog and to the tracks it lists.
 - We use the MOQT Streaming Format (MSF) to advertise tracks, described in [this specification](https://datatracker.ietf.org/doc/html/draft-ietf-moq-msf-00).
 - We use the Low Overhead Media Container (LOC) to ship frames, described in [this specification](https://datatracker.ietf.org/doc/draft-ietf-moq-loc/).
 - We host web pages through a HTTP/2 listener and host the WebTransport endpoint through a HTTP/3 listener. This hybrid setup allows to use self-signed certificates, that are normally forbidden in pure HTTP/3.
