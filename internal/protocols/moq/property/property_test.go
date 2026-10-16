@@ -28,6 +28,37 @@ var cases = []struct {
 			new(property.Timestamp(1000)),
 		},
 	},
+	{
+		name: "timescale",
+		enc: []byte{
+			0x08,       // type delta = 8 (Timescale)
+			0x83, 0xe8, // value = 1000
+		},
+		dec: property.Properties{
+			new(property.Timescale(1000)),
+		},
+	},
+}
+
+func TestUnmarshalLOC04Timestamp(t *testing.T) {
+	// As sent by moq-net: Timescale track property, then a LOC-04 Timestamp object property.
+	var props property.Properties
+	err := props.Unmarshal([]byte{
+		0x10,       // type delta = 0x10 (Timestamp, draft-ietf-moq-loc-04)
+		0x83, 0xe8, // value = 1000
+	})
+	require.NoError(t, err)
+	require.Equal(t, property.Properties{new(property.Timestamp(1000))}, props)
+
+	props = nil
+	err = props.Unmarshal([]byte{
+		0x08,       // type delta = 8 (Timescale)
+		0x83, 0xe8, // value = 1000
+		0x08, // type delta = 8 -> 0x10 (Timestamp)
+		0x05, // value = 5
+	})
+	require.NoError(t, err)
+	require.Equal(t, property.Properties{new(property.Timescale(1000)), new(property.Timestamp(5))}, props)
 }
 
 func TestUnmarshal(t *testing.T) {
