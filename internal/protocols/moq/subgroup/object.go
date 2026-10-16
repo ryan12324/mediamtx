@@ -1,6 +1,7 @@
 package subgroup
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -12,9 +13,18 @@ const (
 	maxPropsLen    = 128 * 1024
 	maxPayloadSize = 10 * 1024 * 1024
 
+	objectStatusNormal     = 0x00
 	objectStatusEndOfGroup = 0x03
 	objectStatusEndOfTrack = 0x04
 )
+
+// an EOF after the first field of an object means the stream was cut short.
+func noEOF(err error) error {
+	if errors.Is(err, io.EOF) {
+		return io.ErrUnexpectedEOF
+	}
+	return err
+}
 
 // Object is an object of a subgroup stream.
 // spec:
@@ -24,6 +34,11 @@ type Object struct {
 	IDDelta    uint64
 	Properties property.Properties
 	Payload    []byte
+
+	// set when the payload is empty.
+	// spec:
+	// * draft-18/19, section 11.2.1.1
+	status uint64
 }
 
 func (o *Object) read(r io.Reader, header *Header) error {
@@ -38,7 +53,7 @@ func (o *Object) read(r io.Reader, header *Header) error {
 		var propsLen varint.Varint
 		err := propsLen.Read(r)
 		if err != nil {
-			return err
+			return noEOF(err)
 		}
 
 		if propsLen > 0 {
@@ -49,7 +64,7 @@ func (o *Object) read(r io.Reader, header *Header) error {
 			props := make([]byte, propsLen)
 			_, err = io.ReadFull(r, props)
 			if err != nil {
-				return err
+				return noEOF(err)
 			}
 
 			err = o.Properties.Unmarshal(props)
@@ -62,19 +77,22 @@ func (o *Object) read(r io.Reader, header *Header) error {
 	var payloadLen varint.Varint
 	err := payloadLen.Read(r)
 	if err != nil {
-		return err
+		return noEOF(err)
 	}
 
 	if payloadLen == 0 {
 		var status varint.Varint
 		if err = status.Read(r); err != nil {
-			return err
+			return noEOF(err)
 		}
 
-		if status != objectStatusEndOfGroup && status != objectStatusEndOfTrack {
+		switch status {
+		case objectStatusNormal, objectStatusEndOfGroup, objectStatusEndOfTrack:
+		default:
 			return fmt.Errorf("unexpected status: 0x%x", status)
 		}
 
+		o.status = uint64(status)
 		return nil
 	}
 
@@ -85,7 +103,7 @@ func (o *Object) read(r io.Reader, header *Header) error {
 	o.Payload = make([]byte, payloadLen)
 	_, err = io.ReadFull(r, o.Payload)
 	if err != nil {
-		return err
+		return noEOF(err)
 	}
 
 	return nil

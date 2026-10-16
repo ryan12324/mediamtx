@@ -2,6 +2,7 @@ package subgroup_test
 
 import (
 	"bytes"
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -91,6 +92,102 @@ func TestMarshal(t *testing.T) {
 			require.Equal(t, ca.enc, ca.dec.Marshal())
 		})
 	}
+}
+
+// moq-net (moq-dev/moq) puts a whole group of pictures in one subgroup,
+// one object per frame (draft-ietf-moq-msf-01, section 4.1), and ends the
+// stream with a FIN instead of an End of Group object.
+func TestReadSeveralObjects(t *testing.T) {
+	buf := []byte{
+		0x31,       // type (Properties=true)
+		0x03,       // TrackAlias = 3
+		0x00,       // GroupID = 0
+		0x00,       // object IDDelta = 0
+		0x00,       // properties length = 0
+		0x02,       // payload length = 2
+		0x01, 0x02, // payload
+		0x00,       // object IDDelta = 0 (object 1)
+		0x00,       // properties length = 0
+		0x00,       // payload length = 0
+		0x00,       // status = Normal
+		0x00,       // object IDDelta = 0 (object 2)
+		0x00,       // properties length = 0
+		0x02,       // payload length = 2
+		0x03, 0x04, // payload
+	}
+
+	sr := subgroup.Reader{R: bytes.NewReader(buf)}
+	err := sr.ReadHeader()
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), sr.Header.TrackAlias)
+
+	obj, err := sr.ReadObject()
+	require.NoError(t, err)
+	require.Equal(t, []byte{1, 2}, obj.Payload)
+
+	// the empty Normal object is skipped
+	obj, err = sr.ReadObject()
+	require.NoError(t, err)
+	require.Equal(t, []byte{3, 4}, obj.Payload)
+
+	_, err = sr.ReadObject()
+	require.Equal(t, io.EOF, err)
+
+	var s subgroup.SubGroup
+	err = s.Read(bytes.NewReader(buf))
+	require.NoError(t, err)
+	require.Len(t, s.Objects, 2)
+}
+
+func TestReadEndOfGroup(t *testing.T) {
+	sr := subgroup.Reader{R: bytes.NewReader([]byte{
+		0x30,       // type
+		0x01,       // TrackAlias = 1
+		0x00,       // GroupID = 0
+		0x00,       // object IDDelta = 0
+		0x02,       // payload length = 2
+		0x01, 0x02, // payload
+		0x00, // object IDDelta = 0
+		0x00, // payload length = 0
+		0x03, // status = EndOfGroup
+		0xff, // not read
+	})}
+	err := sr.ReadHeader()
+	require.NoError(t, err)
+
+	_, err = sr.ReadObject()
+	require.NoError(t, err)
+
+	_, err = sr.ReadObject()
+	require.Equal(t, io.EOF, err)
+}
+
+func TestReadTruncated(t *testing.T) {
+	sr := subgroup.Reader{R: bytes.NewReader([]byte{
+		0x30,       // type
+		0x01,       // TrackAlias = 1
+		0x00,       // GroupID = 0
+		0x00,       // object IDDelta = 0
+		0x05,       // payload length = 5
+		0x01, 0x02, // payload, cut short
+	})}
+	err := sr.ReadHeader()
+	require.NoError(t, err)
+
+	_, err = sr.ReadObject()
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+
+	sr = subgroup.Reader{R: bytes.NewReader([]byte{
+		0x30, // type
+		0x01, // TrackAlias = 1
+		0x00, // GroupID = 0
+		0x00, // object IDDelta = 0, then nothing
+	})}
+	err = sr.ReadHeader()
+	require.NoError(t, err)
+
+	_, err = sr.ReadObject()
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 }
 
 func FuzzUnmarshal(f *testing.F) {

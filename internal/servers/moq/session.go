@@ -731,22 +731,27 @@ func (s *session) onPublishTrack(wstream io.ReadWriteCloser) error {
 }
 
 func (s *session) onUniSubGroup(r io.Reader) error {
-	var sg subgroup.SubGroup
-	err := sg.Read(r)
+	sr := &subgroup.Reader{R: r}
+	err := sr.ReadHeader()
 	if err != nil {
 		return err
 	}
 
-	if sg.Header.TrackAlias == 0 {
-		return s.onDataCatalog(r, &sg)
+	if sr.Header.TrackAlias == 0 {
+		return s.onDataCatalog(r, sr)
 	}
 
-	return s.onDataTrack(r, &sg)
+	return s.onDataTrack(sr)
 }
 
-func (s *session) onDataCatalog(r io.Reader, sg *subgroup.SubGroup) error {
+func (s *session) onDataCatalog(r io.Reader, sr *subgroup.Reader) error {
+	obj, err := sr.ReadObject()
+	if err != nil {
+		return err
+	}
+
 	var cat catalog.Catalog
-	err := json.Unmarshal(sg.Objects[0].Payload, &cat)
+	err = json.Unmarshal(obj.Payload, &cat)
 	if err != nil {
 		return fmt.Errorf("failed to parse catalog JSON: %w", err)
 	}
@@ -765,29 +770,39 @@ func (s *session) onDataCatalog(r io.Reader, sg *subgroup.SubGroup) error {
 	return nil
 }
 
-func (s *session) onDataTrack(r io.Reader, sg *subgroup.SubGroup) error {
+func (s *session) onDataTrack(sr *subgroup.Reader) error {
 	select {
 	case <-s.publishReady:
 	case <-s.ctx.Done():
 		return fmt.Errorf("terminated")
 	}
 
-	track, ok := s.inboundTracks[sg.Header.TrackAlias]
+	track, ok := s.inboundTracks[sr.Header.TrackAlias]
 	if !ok {
-		return fmt.Errorf("track %d not found", sg.Header.TrackAlias)
+		return fmt.Errorf("track %d not found", sr.Header.TrackAlias)
 	}
 
-	for _, obj := range sg.Objects {
+	// pass on each object as soon as it is read, since a subgroup
+	// can last for a whole group of pictures.
+	for {
+		obj, err := sr.ReadObject()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+
 		s.inboundBytes.Add(uint64(len(obj.Payload)))
-	}
 
-	err := track.push(sg)
-	if err != nil {
-		return err
+		err = track.push(&subgroup.SubGroup{
+			Header:  sr.Header,
+			Objects: []subgroup.Object{*obj},
+		})
+		if err != nil {
+			return err
+		}
 	}
-
-	io.Copy(io.Discard, r)
-	return nil
 }
 
 func (s *session) apiItem() defs.APIMoQSession {
