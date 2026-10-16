@@ -129,6 +129,23 @@ var cases = []struct {
 		},
 	},
 	{
+		name: "subscribe_ok with largest object",
+		enc: []byte{
+			0x04,       // type 0x04
+			0x00, 0x05, // length = 5
+			0x01,       // TrackAlias = 1
+			0x01,       // Number of Parameters = 1
+			0x09,       // type delta = 9 (LargestObject)
+			0x00, 0x00, // Location = {Group 0, Object 0}
+		},
+		dec: &controlmessage.SubscribeOk{
+			TrackAlias: 1,
+			Parameters: parameter.Parameters{
+				&parameter.LargestObject{},
+			},
+		},
+	},
+	{
 		name: "request_error",
 		enc: []byte{
 			0x05,       // type 0x05
