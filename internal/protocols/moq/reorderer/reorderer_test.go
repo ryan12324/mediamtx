@@ -74,15 +74,56 @@ func TestReordererStale(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []*subgroup.SubGroup{sg5}, out)
 
-	// same GroupID again
-	out, err = r.Push(makeSG(5))
-	require.NoError(t, err)
-	require.Nil(t, out)
-
 	// older GroupID
 	out, err = r.Push(makeSG(3))
 	require.NoError(t, err)
 	require.Nil(t, out)
+}
+
+func TestReordererSameGroup(t *testing.T) {
+	r := newTestReorderer(5, 100000)
+
+	sg5 := makeSG(5)
+	out, err := r.Push(sg5)
+	require.NoError(t, err)
+	require.Equal(t, []*subgroup.SubGroup{sg5}, out)
+
+	// next object of the current group
+	sg5b := makeSG(5)
+	out, err = r.Push(sg5b)
+	require.NoError(t, err)
+	require.Equal(t, []*subgroup.SubGroup{sg5b}, out)
+}
+
+func TestReordererPendingGroupObjects(t *testing.T) {
+	r := newTestReorderer(5, 100000)
+
+	out, err := r.Push(makeSGWithPayload(0, 1))
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+
+	// two objects of group 2 arrive before group 1; both are kept
+	out, err = r.Push(makeSGWithPayload(2, 2))
+	require.NoError(t, err)
+	require.Nil(t, out)
+
+	out, err = r.Push(makeSGWithPayload(2, 3))
+	require.NoError(t, err)
+	require.Nil(t, out)
+
+	out, err = r.Push(makeSGWithPayload(1, 4))
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	require.Equal(t, uint64(1), out[0].Header.GroupID)
+	require.Equal(t, uint64(2), out[1].Header.GroupID)
+	require.Len(t, out[1].Objects, 2)
+	require.Equal(t, 0, r.Parent.pendingBytes)
+
+	// later objects of group 2 are passed on directly
+	sg2 := makeSGWithPayload(2, 5)
+	out, err = r.Push(sg2)
+	require.NoError(t, err)
+	require.Equal(t, []*subgroup.SubGroup{sg2}, out)
 }
 
 func TestReordererOutOfOrderPending(t *testing.T) {

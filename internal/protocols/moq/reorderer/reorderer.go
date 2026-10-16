@@ -43,6 +43,8 @@ func (r *Reorderer) Initialize() {
 }
 
 // Push pushes a subgroup and returns a list of subgroups that are now in order.
+// Groups are put in order; subgroups of the current group are passed on as they
+// come, since a group can be split into several objects and read one object at a time.
 func (r *Reorderer) Push(sg *subgroup.SubGroup) ([]*subgroup.SubGroup, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -54,7 +56,10 @@ func (r *Reorderer) Push(sg *subgroup.SubGroup) ([]*subgroup.SubGroup, error) {
 	}
 
 	switch {
-	case sg.Header.GroupID <= r.curGroupID:
+	case sg.Header.GroupID == r.curGroupID:
+		return []*subgroup.SubGroup{sg}, nil
+
+	case sg.Header.GroupID < r.curGroupID:
 		r.Parent.Parent.Log(logger.Warn, "skipping out-of-order subgroup")
 
 	case sg.Header.GroupID == r.curGroupID+1 && len(r.pending) == 0:
@@ -63,9 +68,10 @@ func (r *Reorderer) Push(sg *subgroup.SubGroup) ([]*subgroup.SubGroup, error) {
 
 	default:
 		if prev, ok := r.pending[sg.Header.GroupID]; ok {
-			r.Parent.removePendingBytes(subGroupPayloadSize(prev))
+			prev.Objects = append(prev.Objects, sg.Objects...)
+		} else {
+			r.pending[sg.Header.GroupID] = sg
 		}
-		r.pending[sg.Header.GroupID] = sg
 		withinLimit := r.Parent.addPendingBytes(subGroupPayloadSize(sg))
 
 		diff := sg.Header.GroupID - r.curGroupID
