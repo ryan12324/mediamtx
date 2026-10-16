@@ -943,14 +943,17 @@ func dialNativeQUIC(ctx context.Context, t *testing.T, path string) *quic.Conn {
 	return conn
 }
 
-// A publisher can send PUBLISH_NAMESPACE and wait for SUBSCRIBE, as moq-net
-// does, and it chooses the track aliases.
-func TestServerPublishNamespace(t *testing.T) {
+// namespacePublisher plays a publisher that sends PUBLISH_NAMESPACE and waits for
+// SUBSCRIBE, as moq-net does: it announces an empty namespace, picks track aliases 1
+// (catalog) and 3 (video), and sends the catalog. It returns the connection, ready to
+// send video subgroups on alias 3, and the units that reach the stream.
+func namespacePublisher(ctx context.Context, t *testing.T) (*quic.Conn, <-chan *unit.Unit) {
+	t.Helper()
+
 	serverCertFile := test.CreateTempFile(t, test.TLSCertPub)
 	serverKeyFile := test.CreateTempFile(t, test.TLSCertKey)
 
 	var strm *stream.Stream
-	var subStream *stream.SubStream
 	published := make(chan *description.Session, 1)
 
 	pm := &test.PathManager{
@@ -969,7 +972,7 @@ func TestServerPublishNamespace(t *testing.T) {
 			err := strm.Initialize()
 			require.NoError(t, err)
 
-			subStream = &stream.SubStream{Stream: strm, UseRTPPackets: false}
+			subStream := &stream.SubStream{Stream: strm, UseRTPPackets: false}
 			err = subStream.Initialize()
 			require.NoError(t, err)
 
@@ -993,13 +996,10 @@ func TestServerPublishNamespace(t *testing.T) {
 	}
 	err := s.Initialize()
 	require.NoError(t, err)
-	defer s.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	t.Cleanup(s.Close)
 
 	conn := dialNativeQUIC(ctx, t, "/teststream")
-	defer conn.CloseWithError(0, "") //nolint:errcheck
+	t.Cleanup(func() { conn.CloseWithError(0, "") }) //nolint:errcheck
 
 	// the PUBLISH_NAMESPACE that moq-net sends: request ID 0, empty namespace.
 	pubNS, err := conn.OpenStreamSync(ctx)
@@ -1027,26 +1027,6 @@ func TestServerPublishNamespace(t *testing.T) {
 		require.NoError(t, err2)
 	}
 
-	writeObject := func(trackAlias uint64, props property.Properties, payload []byte) {
-		uni, err2 := conn.OpenUniStreamSync(ctx)
-		require.NoError(t, err2)
-		defer uni.Close() //nolint:errcheck
-
-		sg := &subgroup.SubGroup{
-			Header: subgroup.Header{
-				HasProperties: len(props) != 0,
-				IsFirstObject: true,
-				TrackAlias:    trackAlias,
-			},
-			Objects: []subgroup.Object{{
-				Properties: props,
-				Payload:    payload,
-			}},
-		}
-		_, err2 = uni.Write(sg.Marshal())
-		require.NoError(t, err2)
-	}
-
 	acceptSubscribe("catalog", 1)
 
 	cat, err := json.Marshal(catalog.Catalog{Version: "1", Tracks: []catalog.Track{{
@@ -1056,7 +1036,7 @@ func TestServerPublishNamespace(t *testing.T) {
 		Codec:     "avc3.640028",
 	}}})
 	require.NoError(t, err)
-	writeObject(1, nil, cat)
+	writeSubGroup(ctx, t, conn, 1, 0, nil, cat, true)
 
 	acceptSubscribe("video", 3)
 
@@ -1075,18 +1055,108 @@ func TestServerPublishNamespace(t *testing.T) {
 		return nil
 	})
 	strm.AddReader(r)
-	defer strm.RemoveReader(r)
-	defer strm.Close()
+	t.Cleanup(func() {
+		strm.RemoveReader(r)
+		strm.Close()
+	})
 
+	return conn, received
+}
+
+// writeSubGroup sends one object as a subgroup stream. With end false, the end-of-group
+// marker is left out and the stream is returned open.
+func writeSubGroup(
+	ctx context.Context,
+	t *testing.T,
+	conn *quic.Conn,
+	trackAlias uint64,
+	groupID uint64,
+	props property.Properties,
+	payload []byte,
+	end bool,
+) *quic.SendStream {
+	t.Helper()
+
+	uni, err := conn.OpenUniStreamSync(ctx)
+	require.NoError(t, err)
+
+	buf := (&subgroup.SubGroup{
+		Header: subgroup.Header{
+			HasProperties: len(props) != 0,
+			IsFirstObject: true,
+			TrackAlias:    trackAlias,
+			GroupID:       groupID,
+		},
+		Objects: []subgroup.Object{{
+			Properties: props,
+			Payload:    payload,
+		}},
+	}).Marshal()
+	if !end {
+		// the end-of-group object: ID delta, (properties length,) payload length 0, status.
+		marker := 3
+		if len(props) != 0 {
+			marker = 4
+		}
+		buf = buf[:len(buf)-marker]
+	}
+	_, err = uni.Write(buf)
+	require.NoError(t, err)
+
+	if end {
+		uni.Close() //nolint:errcheck
+	}
+	return uni
+}
+
+func testAU(t *testing.T) []byte {
 	au, err := h264.AVCC{test.FormatH264.SPS, test.FormatH264.PPS, {5, 1}}.Marshal()
 	require.NoError(t, err)
-	writeObject(3, property.Properties{new(property.Timestamp(90000))}, au)
+	return au
+}
+
+// A publisher can send PUBLISH_NAMESPACE and wait for SUBSCRIBE, as moq-net
+// does, and it chooses the track aliases.
+func TestServerPublishNamespace(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, received := namespacePublisher(ctx, t)
+	writeSubGroup(ctx, t, conn, 3, 0, property.Properties{new(property.Timestamp(90000))}, testAU(t), true)
 
 	select {
 	case u := <-received:
 		require.Equal(t, unit.PayloadH264{test.FormatH264.SPS, test.FormatH264.PPS, {5, 1}}, u.Payload)
 	case <-ctx.Done():
 		t.Fatal("timeout waiting for data")
+	}
+}
+
+// A subgroup stream the publisher resets ends that subgroup, not the session
+// (draft-18/19, section 11.4.3).
+func TestServerPublishNamespaceStreamReset(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, received := namespacePublisher(ctx, t)
+
+	// Group 0: one frame, then the publisher resets the stream (a delivery timeout, a leg
+	// that went away). QUIC drops unread data on a reset, so the frame is read first.
+	uni := writeSubGroup(ctx, t, conn, 3, 0, property.Properties{new(property.Timestamp(90000))}, testAU(t), false)
+	select {
+	case <-received:
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for the frame before the reset")
+	}
+	uni.CancelWrite(1)
+
+	// Group 1 still comes through: the session is alive.
+	writeSubGroup(ctx, t, conn, 3, 1, property.Properties{new(property.Timestamp(93000))}, testAU(t), true)
+	select {
+	case u := <-received:
+		require.Equal(t, unit.PayloadH264{test.FormatH264.SPS, test.FormatH264.PPS, {5, 1}}, u.Payload)
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for the group after the reset")
 	}
 }
 

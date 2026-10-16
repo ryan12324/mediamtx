@@ -255,6 +255,9 @@ func (s *session) runUniStream(wstream io.Reader) error {
 	br := bufio.NewReader(wstream)
 	firstByte, err := br.Peek(1)
 	if err != nil {
+		if moq.IsStreamReset(err) {
+			return nil
+		}
 		return err
 	}
 
@@ -983,6 +986,9 @@ func (s *session) onUniSubGroup(r io.Reader) error {
 	sr := &subgroup.Reader{R: r}
 	err := sr.ReadHeader()
 	if err != nil {
+		if moq.IsStreamReset(err) {
+			return nil
+		}
 		return err
 	}
 
@@ -1050,7 +1056,8 @@ func (s *session) onDataTrack(sr *subgroup.Reader) error {
 	for {
 		obj, err := sr.ReadObject()
 		if err != nil {
-			if errors.Is(err, io.EOF) {
+			// a reset stream ends this subgroup only (draft-18/19, section 11.4.3).
+			if errors.Is(err, io.EOF) || moq.IsStreamReset(err) {
 				return nil
 			}
 			return err

@@ -335,7 +335,9 @@ func (c *Client) handleUniStream(uni io.Reader) {
 	sr := &subgroup.Reader{R: uni}
 	err := sr.ReadHeader()
 	if err != nil {
-		c.sendError(err)
+		if !IsStreamReset(err) {
+			c.sendError(err)
+		}
 		return
 	}
 
@@ -354,7 +356,8 @@ func (c *Client) handleUniStream(uni io.Reader) {
 		var obj *subgroup.Object
 		obj, err = sr.ReadObject()
 		if err != nil {
-			if !errors.Is(err, io.EOF) {
+			// a reset stream ends this subgroup only (draft-18/19, section 11.4.3).
+			if !errors.Is(err, io.EOF) && !IsStreamReset(err) {
 				c.sendError(err)
 			}
 			return
