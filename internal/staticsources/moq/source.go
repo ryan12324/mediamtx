@@ -14,6 +14,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/logger"
 	protomoq "github.com/bluenviron/mediamtx/internal/protocols/moq"
 	"github.com/bluenviron/mediamtx/internal/protocols/moq/catalog"
+	"github.com/bluenviron/mediamtx/internal/protocols/moq/property"
 	"github.com/bluenviron/mediamtx/internal/protocols/moq/reorderer"
 	"github.com/bluenviron/mediamtx/internal/protocols/moq/subgroup"
 	ptls "github.com/bluenviron/mediamtx/internal/protocols/tls"
@@ -109,7 +110,7 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 	}()
 
 	catalogSg := make(chan *subgroup.SubGroup, 1)
-	err = client.Subscribe(params.Context, "catalog", func(sg *subgroup.SubGroup) error {
+	_, err = client.Subscribe(params.Context, "catalog", func(sg *subgroup.SubGroup) error {
 		s.addInboundBytes(sg.Objects)
 
 		select {
@@ -143,7 +144,13 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 	}
 
 	var subStream *stream.SubStream
-	medias, writeFuncs, err := protomoq.ToStream(&cat, &subStream)
+	var timescalesMutex sync.Mutex
+	timescales := make(map[uint64]uint64)
+	medias, writeFuncs, err := protomoq.ToStream(&cat, &subStream, func(trackAlias uint64) uint64 {
+		timescalesMutex.Lock()
+		defer timescalesMutex.Unlock()
+		return timescales[trackAlias]
+	})
 	if err != nil {
 		return err
 	}
@@ -172,9 +179,18 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 		tr := &inboundTrack{onSubGroup: writer, orchestrator: orchestrator, addInboundBytes: s.addInboundBytes}
 		tr.initialize()
 
-		err = client.Subscribe(params.Context, track.Name, tr.push)
+		var props property.Properties
+		props, err = client.Subscribe(params.Context, track.Name, tr.push)
 		if err != nil {
 			return err
+		}
+
+		for _, pr := range props {
+			if ts, ok := pr.(*property.Timescale); ok {
+				timescalesMutex.Lock()
+				timescales[uint64(i+1)] = uint64(*ts)
+				timescalesMutex.Unlock()
+			}
 		}
 	}
 

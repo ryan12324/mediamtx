@@ -110,6 +110,7 @@ type session struct {
 	catalogReceived chan *catalog.Catalog    // publish only
 	publishReady    chan struct{}            // publish only
 	inboundTracks   map[uint64]*inboundTrack // publish only
+	trackTimescales map[uint64]uint64        // publish only
 
 	inboundBytes  atomic.Uint64
 	outboundBytes atomic.Uint64
@@ -390,7 +391,7 @@ func (s *session) runBidiStream(wstream io.ReadWriteCloser) error {
 			return s.onPublishCatalog(wstream, m)
 		}
 
-		return s.onPublishTrack(wstream)
+		return s.onPublishTrack(wstream, m)
 
 	default:
 		return fmt.Errorf("unsupported message type: %T", msg)
@@ -613,7 +614,7 @@ func (s *session) onPublishCatalog(wstream io.ReadWriteCloser, m *controlmessage
 	case cat := <-s.catalogReceived:
 		var subStream *stream.SubStream
 
-		medias, writeFuncs, err := moq.ToStream(cat, &subStream)
+		medias, writeFuncs, err := moq.ToStream(cat, &subStream, s.trackTimescale)
 		if err != nil {
 			return err
 		}
@@ -704,11 +705,25 @@ func (s *session) onPublishCatalog(wstream io.ReadWriteCloser, m *controlmessage
 	return fmt.Errorf("PUBLISH catalog stream closed")
 }
 
-func (s *session) onPublishTrack(wstream io.ReadWriteCloser) error {
+func (s *session) trackTimescale(trackAlias uint64) uint64 {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	return s.trackTimescales[trackAlias]
+}
+
+func (s *session) onPublishTrack(wstream io.ReadWriteCloser, m *controlmessage.Publish) error {
 	s.mutex.Lock()
 	if s.state != defs.APIMoQSessionStatePublish {
 		s.mutex.Unlock()
 		return fmt.Errorf("unexpected PUBLISH in state %s", s.state)
+	}
+	for _, pr := range m.TrackProperties {
+		if ts, ok := pr.(*property.Timescale); ok {
+			if s.trackTimescales == nil {
+				s.trackTimescales = make(map[uint64]uint64)
+			}
+			s.trackTimescales[m.TrackAlias] = uint64(*ts)
+		}
 	}
 	s.mutex.Unlock()
 

@@ -282,7 +282,7 @@ func TestClientProtocols(t *testing.T) {
 	require.Equal(t, defs.APIMoQVersionDraft18, client.Version())
 
 	received := make(chan *subgroup.SubGroup, 1)
-	err = client.Subscribe(context.Background(), "test", func(sg *subgroup.SubGroup) error {
+	_, err = client.Subscribe(context.Background(), "test", func(sg *subgroup.SubGroup) error {
 		received <- sg
 		return nil
 	})
@@ -306,7 +306,7 @@ func TestClientSubscribe(t *testing.T) {
 	defer client.Close() //nolint:errcheck
 
 	received := make(chan *subgroup.SubGroup, 1)
-	err := client.Subscribe(context.Background(), "test", func(sg *subgroup.SubGroup) error {
+	_, err := client.Subscribe(context.Background(), "test", func(sg *subgroup.SubGroup) error {
 		received <- sg
 		return nil
 	})
@@ -332,7 +332,7 @@ func TestClientSubscribeUnknownTrackAlias(t *testing.T) {
 	client := newClient(t, server)
 	defer client.Close() //nolint:errcheck
 
-	err := client.Subscribe(context.Background(), "test", func(*subgroup.SubGroup) error {
+	_, err := client.Subscribe(context.Background(), "test", func(*subgroup.SubGroup) error {
 		return nil
 	})
 	require.NoError(t, err)
