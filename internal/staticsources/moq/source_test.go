@@ -343,7 +343,7 @@ func basicAuthToken(user string, pass string) string {
 
 func catalogPayload() ([]byte, error) {
 	return json.Marshal(catalog.Catalog{
-		Version: 1,
+		Version: "1",
 		Tracks: []catalog.Track{{
 			Name:      "0",
 			Packaging: "loc",
