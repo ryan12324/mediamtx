@@ -1021,6 +1021,7 @@ func TestServerPublishNamespace(t *testing.T) {
 		require.True(t, ok)
 		require.Equal(t, trackName, sub.TrackName)
 		require.Equal(t, uint64(1), sub.RequestID%2)
+		require.Equal(t, parameter.Parameters{new(parameter.GroupOrderAscending)}, sub.Parameters)
 
 		_, err2 = bidi.Write(controlmessage.SubscribeOk{TrackAlias: trackAlias}.Marshal())
 		require.NoError(t, err2)

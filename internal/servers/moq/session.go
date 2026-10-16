@@ -902,10 +902,16 @@ func (s *session) subscribe(ns namespace.Namespace, trackName string) (*controlm
 	s.nextRequestID += 2
 	s.mutex.Unlock()
 
+	// ask for older groups first, so that the end of a group of pictures
+	// isn't overtaken by the next one and dropped by the reorderer.
+	// spec: draft-18/19, sections 7 and 10.2.8
 	_, err = bidi.Write(controlmessage.Subscribe{
 		RequestID: requestID,
 		Namespace: ns,
 		TrackName: trackName,
+		Parameters: parameter.Parameters{
+			new(parameter.GroupOrderAscending),
+		},
 	}.Marshal())
 	if err != nil {
 		return nil, err
