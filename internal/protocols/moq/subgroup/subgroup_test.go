@@ -2,6 +2,7 @@ package subgroup_test
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -72,6 +73,65 @@ var cases = []struct {
 			}},
 		},
 	},
+	{
+		name: "stream with priority",
+		enc: []byte{
+			0x50,                         // type (DefaultPriority=false, FirstObject=true)
+			0x01,                         // TrackAlias = 1
+			0x00,                         // GroupID = 0
+			0x80,                         // Publisher Priority = 128
+			0x00,                         // object IDDelta = 0
+			0x05,                         // payload length = 5
+			0x68, 0x65, 0x6c, 0x6c, 0x6f, // payload = "hello"
+			0x00, // end-of-stream IDDelta = 0
+			0x00, // payload length = 0 (end-of-stream)
+			0x03, // status = EndOfGroup
+		},
+		dec: subgroup.SubGroup{
+			Header: subgroup.Header{
+				IsFirstObject: true,
+				TrackAlias:    1,
+				GroupID:       0,
+				HasPriority:   true,
+				Priority:      128,
+			},
+			Objects: []subgroup.Object{{
+				Payload: []byte("hello"),
+			}},
+		},
+	},
+	{
+		name: "stream with subgroup id and priority",
+		enc: []byte{
+			0x15,                         // type (Properties=true, SubgroupIDMode=present, DefaultPriority=false)
+			0x02,                         // TrackAlias = 2
+			0x07,                         // GroupID = 7
+			0x03,                         // SubgroupID = 3
+			0x40,                         // Publisher Priority = 64
+			0x00,                         // object IDDelta = 0
+			0x00,                         // properties length = 0
+			0x05,                         // payload length = 5
+			0x68, 0x65, 0x6c, 0x6c, 0x6f, // payload = "hello"
+			0x00, // end-of-stream IDDelta = 0
+			0x00, // properties length = 0
+			0x00, // payload length = 0 (end-of-stream)
+			0x03, // status = EndOfGroup
+		},
+		dec: subgroup.SubGroup{
+			Header: subgroup.Header{
+				HasProperties:  true,
+				SubgroupIDMode: subgroup.IDModePresent,
+				TrackAlias:     2,
+				GroupID:        7,
+				SubgroupID:     3,
+				HasPriority:    true,
+				Priority:       64,
+			},
+			Objects: []subgroup.Object{{
+				Payload: []byte("hello"),
+			}},
+		},
+	},
 }
 
 func TestUnmarshal(t *testing.T) {
@@ -90,6 +150,44 @@ func TestMarshal(t *testing.T) {
 		t.Run(ca.name, func(t *testing.T) {
 			require.Equal(t, ca.enc, ca.dec.Marshal())
 		})
+	}
+}
+
+// moq-net (moq-dev/moq) sends this header: type 0x58 has END_OF_GROUP and
+// FIRST_OBJECT set and DEFAULT_PRIORITY clear, so a Priority byte follows.
+func TestReadHeaderPriority(t *testing.T) {
+	var s subgroup.SubGroup
+	err := s.Read(bytes.NewReader([]byte{
+		0x58,             // type
+		0x01,             // TrackAlias = 1
+		0x00,             // GroupID = 0
+		0x80,             // Publisher Priority = 128
+		0x00,             // object IDDelta = 0
+		0x02, 0x7b, 0x7d, // payload = "{}"
+		0x00, // end-of-stream IDDelta = 0
+		0x00, // payload length = 0 (end-of-stream)
+		0x03, // status = EndOfGroup
+	}))
+	require.NoError(t, err)
+	require.Equal(t, subgroup.Header{
+		IsFirstObject: true,
+		TrackAlias:    1,
+		HasPriority:   true,
+		Priority:      128,
+	}, s.Header)
+	require.Equal(t, []byte("{}"), s.Objects[0].Payload)
+}
+
+func TestReadHeaderInvalidType(t *testing.T) {
+	for _, typ := range []byte{
+		0x00, // bit 4 not set
+		0x90, // bit 7 set
+		0x16, // IDMode = 0b11 (reserved)
+		0x7f, // IDMode = 0b11 (reserved)
+	} {
+		var s subgroup.SubGroup
+		err := s.Read(bytes.NewReader([]byte{typ, 0x01, 0x00, 0x00, 0x00}))
+		require.EqualError(t, err, fmt.Sprintf("invalid subgroup header type: 0x%x", typ))
 	}
 }
 
