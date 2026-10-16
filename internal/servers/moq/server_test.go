@@ -225,7 +225,7 @@ func TestServer(t *testing.T) {
 				require.NoError(t, err)
 
 				require.Equal(t, catalog.Catalog{
-					Version: 1,
+					Version: "1",
 					Tracks: []catalog.Track{{
 						Name:      "0",
 						Packaging: "loc",
@@ -495,7 +495,7 @@ func TestServerNativeQUICSubscribe(t *testing.T) {
 				err = json.Unmarshal(catalogSG.Objects[0].Payload, &cat)
 				require.NoError(t, err)
 				require.Equal(t, catalog.Catalog{
-					Version: 1,
+					Version: "1",
 					Tracks: []catalog.Track{{
 						Name:      "0",
 						Packaging: "loc",
@@ -571,7 +571,7 @@ func TestServerPublishCatalogNames(t *testing.T) {
 			require.NoError(t, err)
 			defer client.Close() //nolint:errcheck
 
-			cat, err := json.Marshal(catalog.Catalog{Version: 1, Tracks: []catalog.Track{{
+			cat, err := json.Marshal(catalog.Catalog{Version: "1", Tracks: []catalog.Track{{
 				Name:      "0",
 				Packaging: "loc",
 				IsLive:    true,
@@ -761,7 +761,7 @@ func TestServerAuthError(t *testing.T) {
 					require.NoError(t, err)
 
 					var cat []byte
-					cat, err = json.Marshal(catalog.Catalog{Version: 1, Tracks: []catalog.Track{{
+					cat, err = json.Marshal(catalog.Catalog{Version: "1", Tracks: []catalog.Track{{
 						Name:      "0",
 						Packaging: "loc",
 						IsLive:    true,
@@ -904,7 +904,7 @@ func TestServerErrorTooManyTracks(t *testing.T) {
 		}
 	}
 
-	cat, err := json.Marshal(catalog.Catalog{Version: 1, Tracks: tracks})
+	cat, err := json.Marshal(catalog.Catalog{Version: "1", Tracks: tracks})
 	require.NoError(t, err)
 
 	err = client.WriteSubGroup(ctx, 0, 0, nil, cat)
