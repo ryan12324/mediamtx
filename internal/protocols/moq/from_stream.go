@@ -31,7 +31,7 @@ type SetupTrackFunc func(r *stream.Reader, writeData writeDataFunc)
 // FromStream maps a MediaMTX stream to a Media-over-QUIC catalog and subscribed tracks.
 func FromStream(desc *description.Session) (*catalog.Catalog, []SetupTrackFunc, error) {
 	cat := &catalog.Catalog{
-		Version: 1,
+		Version: "1",
 	}
 
 	var setupTracks []SetupTrackFunc

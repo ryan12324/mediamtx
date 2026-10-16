@@ -66,7 +66,7 @@ func TestFromStream(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, &catalog.Catalog{
-		Version: 1,
+		Version: "1",
 		Tracks: []catalog.Track{
 			{
 				Name:      "0",
