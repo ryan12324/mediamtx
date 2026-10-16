@@ -28,6 +28,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/protocols/moq/catalog"
 	"github.com/bluenviron/mediamtx/internal/protocols/moq/controlmessage"
 	"github.com/bluenviron/mediamtx/internal/protocols/moq/parameter"
+	"github.com/bluenviron/mediamtx/internal/protocols/moq/property"
 	"github.com/bluenviron/mediamtx/internal/protocols/moq/subgroup"
 	"github.com/bluenviron/mediamtx/internal/servers/moq"
 	"github.com/bluenviron/mediamtx/internal/stream"
@@ -917,4 +918,229 @@ func TestServerErrorTooManyTracks(t *testing.T) {
 		return parent.contains("too many catalog tracks: 51")
 	}, time.Second, 50*time.Millisecond)
 	require.False(t, addPublisherCalled.Load())
+}
+
+// dialNativeQUIC connects over native QUIC with draft-19 and exchanges SETUP.
+func dialNativeQUIC(ctx context.Context, t *testing.T, path string) *quic.Conn {
+	t.Helper()
+
+	conn, err := quic.DialAddr(ctx, "127.0.0.1:19897", &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec
+		NextProtos:         []string{"moqt-19"},
+	}, &quic.Config{})
+	require.NoError(t, err)
+
+	setupStream, err := conn.OpenUniStreamSync(ctx)
+	require.NoError(t, err)
+	_, err = setupStream.Write(controlmessage.Setup{Path: path}.Marshal())
+	require.NoError(t, err)
+
+	serverSetup, err := conn.AcceptUniStream(ctx)
+	require.NoError(t, err)
+	_, err = controlmessage.Read(serverSetup)
+	require.NoError(t, err)
+
+	return conn
+}
+
+// A publisher can send PUBLISH_NAMESPACE and wait for SUBSCRIBE, as moq-net
+// does, and it chooses the track aliases.
+func TestServerPublishNamespace(t *testing.T) {
+	serverCertFile := test.CreateTempFile(t, test.TLSCertPub)
+	serverKeyFile := test.CreateTempFile(t, test.TLSCertKey)
+
+	var strm *stream.Stream
+	var subStream *stream.SubStream
+	published := make(chan *description.Session, 1)
+
+	pm := &test.PathManager{
+		FindPathConfImpl: func(req defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
+			require.Equal(t, "teststream", req.AccessRequest.Name)
+			require.True(t, req.AccessRequest.Publish)
+			return &defs.PathFindPathConfRes{Conf: &conf.Path{}}, nil
+		},
+		AddPublisherImpl: func(req defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error) {
+			strm = &stream.Stream{
+				OrigDesc:          req.Desc,
+				WriteQueueSize:    512,
+				RTPMaxPayloadSize: 1450,
+				Parent:            test.NilLogger,
+			}
+			err := strm.Initialize()
+			require.NoError(t, err)
+
+			subStream = &stream.SubStream{Stream: strm, UseRTPPackets: false}
+			err = subStream.Initialize()
+			require.NoError(t, err)
+
+			published <- req.Desc
+			return &defs.PathAddPublisherRes{Path: &serverDummyPath{}, SubStream: subStream}, nil
+		},
+	}
+
+	s := &moq.Server{
+		HTTP2Address:   "127.0.0.1:19895",
+		HTTP3Address:   "127.0.0.1:19896",
+		QUICAddress:    "127.0.0.1:19897",
+		ServerCert:     serverCertFile,
+		ServerKey:      serverKeyFile,
+		AllowOrigins:   []string{"*"},
+		TrustedProxies: conf.IPNetworks{},
+		ReadTimeout:    conf.Duration(10 * time.Second),
+		WriteTimeout:   conf.Duration(10 * time.Second),
+		PathManager:    pm,
+		Parent:         test.NilLogger,
+	}
+	err := s.Initialize()
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn := dialNativeQUIC(ctx, t, "/teststream")
+	defer conn.CloseWithError(0, "") //nolint:errcheck
+
+	// the PUBLISH_NAMESPACE that moq-net sends: request ID 0, empty namespace.
+	pubNS, err := conn.OpenStreamSync(ctx)
+	require.NoError(t, err)
+	_, err = pubNS.Write(controlmessage.PublishNamespace{}.Marshal())
+	require.NoError(t, err)
+
+	msg, err := controlmessage.Read(pubNS)
+	require.NoError(t, err)
+	require.Equal(t, &controlmessage.RequestOk{}, msg)
+
+	acceptSubscribe := func(trackName string, trackAlias uint64) {
+		bidi, err2 := conn.AcceptStream(ctx)
+		require.NoError(t, err2)
+
+		msg, err2 = controlmessage.Read(bidi)
+		require.NoError(t, err2)
+		sub, ok := msg.(*controlmessage.Subscribe)
+		require.True(t, ok)
+		require.Equal(t, trackName, sub.TrackName)
+		require.Equal(t, uint64(1), sub.RequestID%2)
+
+		_, err2 = bidi.Write(controlmessage.SubscribeOk{TrackAlias: trackAlias}.Marshal())
+		require.NoError(t, err2)
+	}
+
+	writeObject := func(trackAlias uint64, props property.Properties, payload []byte) {
+		uni, err2 := conn.OpenUniStreamSync(ctx)
+		require.NoError(t, err2)
+		defer uni.Close() //nolint:errcheck
+
+		sg := &subgroup.SubGroup{
+			Header: subgroup.Header{
+				HasProperties: len(props) != 0,
+				IsFirstObject: true,
+				TrackAlias:    trackAlias,
+			},
+			Objects: []subgroup.Object{{
+				Properties: props,
+				Payload:    payload,
+			}},
+		}
+		_, err2 = uni.Write(sg.Marshal())
+		require.NoError(t, err2)
+	}
+
+	acceptSubscribe("catalog", 1)
+
+	cat, err := json.Marshal(catalog.Catalog{Version: 1, Tracks: []catalog.Track{{
+		Name:      "video",
+		Packaging: "loc",
+		IsLive:    true,
+		Codec:     "avc3.640028",
+	}}})
+	require.NoError(t, err)
+	writeObject(1, nil, cat)
+
+	acceptSubscribe("video", 3)
+
+	var desc *description.Session
+	select {
+	case desc = <-published:
+		require.Len(t, desc.Medias, 1)
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for publication")
+	}
+
+	r := &stream.Reader{}
+	received := make(chan *unit.Unit, 1)
+	r.OnData(desc.Medias[0], desc.Medias[0].Formats[0], func(u *unit.Unit) error {
+		received <- u
+		return nil
+	})
+	strm.AddReader(r)
+	defer strm.RemoveReader(r)
+	defer strm.Close()
+
+	au, err := h264.AVCC{test.FormatH264.SPS, test.FormatH264.PPS, {5, 1}}.Marshal()
+	require.NoError(t, err)
+	writeObject(3, property.Properties{new(property.Timestamp(90000))}, au)
+
+	select {
+	case u := <-received:
+		require.Equal(t, unit.PayloadH264{test.FormatH264.SPS, test.FormatH264.PPS, {5, 1}}, u.Payload)
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for data")
+	}
+}
+
+func TestServerPublishNamespaceAuthError(t *testing.T) {
+	serverCertFile := test.CreateTempFile(t, test.TLSCertPub)
+	serverKeyFile := test.CreateTempFile(t, test.TLSCertKey)
+
+	pm := &test.PathManager{
+		FindPathConfImpl: func(req defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
+			require.Equal(t, "secret", req.AccessRequest.Credentials.Token)
+			return nil, &auth.Error{Wrapped: fmt.Errorf("auth error")}
+		},
+		AddPublisherImpl: func(_ defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error) {
+			t.Error("should not happen")
+			return nil, fmt.Errorf("unexpected")
+		},
+	}
+
+	s := &moq.Server{
+		HTTP2Address:   "127.0.0.1:19895",
+		HTTP3Address:   "127.0.0.1:19896",
+		QUICAddress:    "127.0.0.1:19897",
+		ServerCert:     serverCertFile,
+		ServerKey:      serverKeyFile,
+		AllowOrigins:   []string{"*"},
+		TrustedProxies: conf.IPNetworks{},
+		ReadTimeout:    conf.Duration(10 * time.Second),
+		WriteTimeout:   conf.Duration(10 * time.Second),
+		PathManager:    pm,
+		Parent:         test.NilLogger,
+	}
+	err := s.Initialize()
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn := dialNativeQUIC(ctx, t, "/teststream")
+	defer conn.CloseWithError(0, "") //nolint:errcheck
+
+	pubNS, err := conn.OpenStreamSync(ctx)
+	require.NoError(t, err)
+	_, err = pubNS.Write(controlmessage.PublishNamespace{
+		Parameters: parameter.Parameters{&parameter.AuthorizationToken{
+			AliasType:  parameter.AuthorizationTokenAliasTypeUseValue,
+			TokenValue: []byte("Bearer secret"),
+		}},
+	}.Marshal())
+	require.NoError(t, err)
+
+	// the publisher is rejected before anything is subscribed.
+	msg, err := controlmessage.Read(pubNS)
+	require.NoError(t, err)
+	reqErr, ok := msg.(*controlmessage.RequestError)
+	require.True(t, ok)
+	require.Equal(t, controlmessage.RequestErrorCodeUnauthorized, reqErr.Code)
 }
