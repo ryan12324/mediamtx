@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -331,25 +332,42 @@ func (c *Client) runAcceptor() {
 }
 
 func (c *Client) handleUniStream(uni io.Reader) {
-	var sg subgroup.SubGroup
-	err := sg.Read(uni)
+	sr := &subgroup.Reader{R: uni}
+	err := sr.ReadHeader()
 	if err != nil {
 		c.sendError(err)
 		return
 	}
 
 	c.tracksMutex.RLock()
-	onSubGroup := c.tracks[sg.Header.TrackAlias]
+	onSubGroup := c.tracks[sr.Header.TrackAlias]
 	c.tracksMutex.RUnlock()
 
 	if onSubGroup == nil {
-		c.sendError(fmt.Errorf("received subgroup with unknown track alias: %d", sg.Header.TrackAlias))
+		c.sendError(fmt.Errorf("received subgroup with unknown track alias: %d", sr.Header.TrackAlias))
 		return
 	}
 
-	err = onSubGroup(&sg)
-	if err != nil {
-		c.sendError(err)
+	// pass on each object as soon as it is read, since a subgroup
+	// can last for a whole group of pictures.
+	for {
+		var obj *subgroup.Object
+		obj, err = sr.ReadObject()
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				c.sendError(err)
+			}
+			return
+		}
+
+		err = onSubGroup(&subgroup.SubGroup{
+			Header:  sr.Header,
+			Objects: []subgroup.Object{*obj},
+		})
+		if err != nil {
+			c.sendError(err)
+			return
+		}
 	}
 }
 
