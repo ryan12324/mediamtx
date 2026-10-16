@@ -38,6 +38,40 @@ var cases = []struct {
 			},
 		},
 	},
+	{
+		name:  "largest object",
+		count: 1,
+		enc: []byte{
+			0x09, // type delta = 9 (LargestObject)
+			0x00, // group = 0
+			0x00, // object = 0
+		},
+		dec: parameter.Parameters{
+			&parameter.LargestObject{},
+		},
+	},
+	{
+		name:  "authorization token and largest object",
+		count: 2,
+		enc: []byte{
+			0x03,                               // type delta = 3 (AuthorizationToken)
+			0x08,                               // inner length = 8
+			0x03,                               // alias type = UseValue
+			0x01,                               // token type = 1
+			0x73, 0x65, 0x63, 0x72, 0x65, 0x74, // token value = "secret"
+			0x06,       // type delta = 6 (LargestObject)
+			0x81, 0x2c, // group = 300
+			0x05, // object = 5
+		},
+		dec: parameter.Parameters{
+			&parameter.AuthorizationToken{
+				AliasType:  parameter.AuthorizationTokenAliasTypeUseValue,
+				TokenType:  1,
+				TokenValue: []byte("secret"),
+			},
+			&parameter.LargestObject{Group: 300, Object: 5},
+		},
+	},
 }
 
 func TestUnmarshal(t *testing.T) {
