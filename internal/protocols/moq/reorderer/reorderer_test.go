@@ -2,6 +2,7 @@ package reorderer
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -233,4 +234,66 @@ func TestReorderermaxPendingBytes(t *testing.T) {
 	out, err = r.Push(sg4)
 	require.NoError(t, err)
 	require.Equal(t, []*subgroup.SubGroup{sg2, sg4}, out)
+}
+
+type testClock struct{ t time.Time }
+
+func (c *testClock) now() time.Time { return c.t }
+
+func newClockedReorderer() (*Reorderer, *testClock) {
+	c := &testClock{t: time.Unix(1000, 0)}
+	r := newTestReorderer(50, 100000)
+	r.now = c.now
+	return r, c
+}
+
+// A group that never comes (lost on every path) holds the later ones back only for
+// maxPendingWait; then they go on, in order.
+func TestReordererMissingGroupIsSkippedAfterTheWait(t *testing.T) {
+	r, c := newClockedReorderer()
+
+	_, err := r.Push(makeSG(9))
+	require.NoError(t, err)
+
+	sg11 := makeSGWithPayload(11, 10)
+	out, err := r.Push(sg11)
+	require.NoError(t, err)
+	require.Nil(t, out)
+
+	c.t = c.t.Add(100 * time.Millisecond)
+	sg12 := makeSGWithPayload(12, 10)
+	out, err = r.Push(sg12)
+	require.NoError(t, err)
+	require.Nil(t, out)
+
+	c.t = c.t.Add(maxPendingWait)
+	sg13 := makeSGWithPayload(13, 10)
+	out, err = r.Push(sg13)
+	require.NoError(t, err)
+	require.Equal(t, []*subgroup.SubGroup{sg11, sg12, sg13}, out)
+
+	// Back in order: the next group passes at once.
+	sg14 := makeSG(14)
+	out, err = r.Push(sg14)
+	require.NoError(t, err)
+	require.Equal(t, []*subgroup.SubGroup{sg14}, out)
+}
+
+// A group that is only late, within maxPendingWait, is waited for.
+func TestReordererLateGroupWithinTheWait(t *testing.T) {
+	r, c := newClockedReorderer()
+
+	_, err := r.Push(makeSG(0))
+	require.NoError(t, err)
+
+	sg2 := makeSG(2)
+	out, err := r.Push(sg2)
+	require.NoError(t, err)
+	require.Nil(t, out)
+
+	c.t = c.t.Add(maxPendingWait / 2)
+	sg1 := makeSG(1)
+	out, err = r.Push(sg1)
+	require.NoError(t, err)
+	require.Equal(t, []*subgroup.SubGroup{sg1, sg2}, out)
 }

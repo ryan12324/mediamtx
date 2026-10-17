@@ -4,6 +4,7 @@ package reorderer
 import (
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/moq/subgroup"
@@ -11,6 +12,12 @@ import (
 
 const (
 	maxPendingSubGroups = 50
+
+	// maxPendingWait is how long a gap in the group sequence is waited for. A group can
+	// be lost on the way, and groups can always arrive out of order, so a subscriber
+	// cannot tell a late group from one that will never come (draft-ietf-moq-transport-19,
+	// section 2.3.1). A live stream can't hold the later groups back for long.
+	maxPendingWait = 500 * time.Millisecond
 )
 
 func subGroupPayloadSize(sg *subgroup.SubGroup) int {
@@ -26,17 +33,26 @@ type Reorderer struct {
 	Parent *Orchestrator
 
 	maxPendingSubGroups int
+	maxPendingWait      time.Duration
+	now                 func() time.Time
 
-	initialized bool
-	mu          sync.Mutex
-	curGroupID  uint64
-	pending     map[uint64]*subgroup.SubGroup
+	initialized  bool
+	pendingSince time.Time
+	mu           sync.Mutex
+	curGroupID   uint64
+	pending      map[uint64]*subgroup.SubGroup
 }
 
 // Initialize initializes the reorderer.
 func (r *Reorderer) Initialize() {
 	if r.maxPendingSubGroups == 0 {
 		r.maxPendingSubGroups = maxPendingSubGroups
+	}
+	if r.maxPendingWait == 0 {
+		r.maxPendingWait = maxPendingWait
+	}
+	if r.now == nil {
+		r.now = time.Now
 	}
 
 	r.pending = make(map[uint64]*subgroup.SubGroup)
@@ -72,6 +88,9 @@ func (r *Reorderer) Push(sg *subgroup.SubGroup) ([]*subgroup.SubGroup, error) {
 		} else {
 			r.pending[sg.Header.GroupID] = sg
 		}
+		if r.pendingSince.IsZero() {
+			r.pendingSince = r.now()
+		}
 		withinLimit := r.Parent.addPendingBytes(subGroupPayloadSize(sg))
 
 		diff := sg.Header.GroupID - r.curGroupID
@@ -94,10 +113,25 @@ func (r *Reorderer) Push(sg *subgroup.SubGroup) ([]*subgroup.SubGroup, error) {
 		case !withinLimit:
 			r.Parent.Parent.Log(logger.Warn, "too many reordered bytes, flushing")
 			return r.flushUpTo(sg.Header.GroupID), nil
+
+		case r.now().Sub(r.pendingSince) >= r.maxPendingWait:
+			r.Parent.Parent.Log(logger.Warn, "groups %d to %d did not arrive in time, skipping them",
+				r.curGroupID+1, r.firstPending()-1)
+			return r.flushUpTo(sg.Header.GroupID), nil
 		}
 	}
 
 	return nil, nil
+}
+
+func (r *Reorderer) firstPending() uint64 {
+	first := uint64(0)
+	for id := range r.pending {
+		if first == 0 || id < first {
+			first = id
+		}
+	}
+	return first
 }
 
 func (r *Reorderer) flushUpTo(maxGroupID uint64) []*subgroup.SubGroup {
@@ -127,6 +161,13 @@ func (r *Reorderer) flushUpTo(maxGroupID uint64) []*subgroup.SubGroup {
 		r.Parent.removePendingBytes(subGroupPayloadSize(next))
 		delete(r.pending, r.curGroupID+1)
 		r.curGroupID++
+	}
+
+	// Whatever is still held waits for a gap of its own, from now.
+	if len(r.pending) == 0 {
+		r.pendingSince = time.Time{}
+	} else {
+		r.pendingSince = r.now()
 	}
 
 	return out
